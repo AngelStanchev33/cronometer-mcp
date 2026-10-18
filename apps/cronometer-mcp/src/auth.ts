@@ -14,6 +14,7 @@ const FLOW_TTL_SECONDS = 10 * 60;
 const MAX_LOGIN_ATTEMPTS = 5;
 const CSRF_COOKIE = "__Host-CRONOMETER_CSRF";
 const READ_SCOPE = "cronometer:read";
+const WRITE_SCOPE = "cronometer:write";
 
 type AuthEnv = Env & { OAUTH_PROVIDER: OAuthHelpers };
 
@@ -68,6 +69,7 @@ async function beginAuthorization(request: Request, env: AuthEnv): Promise<Respo
     clientName: flow.clientName,
     csrfToken,
     flowId,
+    requestedScopes: flow.oauthRequest.scope ?? [],
     redirectUri: flow.oauthRequest.redirectUri,
     setCookie: csrfCookie(csrfToken, FLOW_TTL_SECONDS),
   });
@@ -85,6 +87,7 @@ async function finishAuthorization(request: Request, env: AuthEnv): Promise<Resp
   const username = stringField(form, "username", 320);
   const password = stringField(form, "password", 1024);
   const userCode = stringField(form, "user_code", 64) ?? "";
+  const writeConsent = form.get("allow_write") === "yes";
   const csrfCookieValue = readCookie(request, CSRF_COOKIE);
 
   if (!flowId || !csrfForm || !username || !password || !csrfCookieValue) {
@@ -116,13 +119,14 @@ async function finishAuthorization(request: Request, env: AuthEnv): Promise<Resp
 
     const subject = await sha256Hex(`cronometer:${webSession.userId}`);
     const requestedScopes = flow.oauthRequest.scope ?? [];
-    const grantedScopes = requestedScopes.filter((scope) => scope === READ_SCOPE);
+    const grantedScopes = grantScopes(requestedScopes, writeConsent);
     const { redirectTo } = await env.OAUTH_PROVIDER.completeAuthorization({
       metadata: { provider: "cronometer" },
       props: {
         cronometerMobileSession: mobileSession,
         cronometerUsername: username,
         cronometerWebSession: webSession,
+        cronometerWriteConsent: grantedScopes.includes(WRITE_SCOPE),
       },
       request: flow.oauthRequest,
       scope: grantedScopes,
@@ -149,9 +153,20 @@ async function finishAuthorization(request: Request, env: AuthEnv): Promise<Resp
       csrfToken: csrfForm,
       error: message,
       flowId,
+      requestedScopes: flow.oauthRequest.scope ?? [],
       redirectUri: flow.oauthRequest.redirectUri,
     });
   }
+}
+
+export function grantScopes(requestedScopes: string[], writeConsent: boolean): string[] {
+  const requested = new Set(requestedScopes);
+  const granted: string[] = [];
+  if (requested.has(READ_SCOPE)) granted.push(READ_SCOPE);
+  if (requested.has(READ_SCOPE) && requested.has(WRITE_SCOPE) && writeConsent) {
+    granted.push(WRITE_SCOPE);
+  }
+  return granted;
 }
 
 function authorizationErrorResponse(error: unknown): Response {
@@ -171,12 +186,24 @@ function loginPage(options: {
   csrfToken: string;
   error?: string;
   flowId: string;
+  requestedScopes: string[];
   redirectUri: string;
   setCookie?: string;
 }): Response {
   const error = options.error
     ? `<p class="error" role="alert">${escapeHtml(options.error)}</p>`
     : "";
+  const writeConsent = options.requestedScopes.includes(WRITE_SCOPE)
+    ? `<section class="permissions" aria-labelledby="permissions-title">
+    <h2 id="permissions-title">Requested access</h2>
+    <ul><li>Read your food log, nutrition, foods, and recipes.</li>
+    <li>Create recipes and custom foods, log or remove food entries, copy diary days, and mark days complete.</li></ul>
+    <label class="consent"><input type="checkbox" name="allow_write" value="yes">
+      I explicitly allow Cronometer MCP to make these changes to my account.
+    </label>
+    <p class="privacy">Leave this unchecked to connect with read-only access.</p>
+  </section>`
+    : `<p class="permissions">This connection can read your Cronometer food log, nutrition, foods, and recipes. It cannot change your account.</p>`;
   const body = `<!doctype html>
 <html lang="en">
 <head>
@@ -194,11 +221,17 @@ function loginPage(options: {
     button { background:#397d25; border:0; border-radius:9px; color:white; cursor:pointer; font:inherit; font-weight:700; margin-top:22px; padding:12px; width:100%; }
     .error { background:#fff1f0; border:1px solid #ffc9c4; border-radius:8px; color:#8d1d15; padding:10px 12px; }
     .privacy { font-size:.8rem; margin-bottom:0; }
+    .permissions { background:#f6f8f4; border:1px solid #dce5d6; border-radius:10px; margin:20px 0; padding:14px 16px; }
+    .permissions h2 { font-size:1rem; margin:0 0 8px; }
+    .permissions ul { color:#52604b; line-height:1.45; padding-left:20px; }
+    label.consent { align-items:flex-start; display:flex; gap:9px; line-height:1.4; margin:14px 0 0; }
+    label.consent input { accent-color:#397d25; flex:0 0 auto; margin:2px 0 0; width:auto; }
   </style>
 </head>
 <body><main>
   <h1>Connect your Cronometer account</h1>
-  <p><strong>${escapeHtml(options.clientName)}</strong> is requesting read-only access through Cronometer MCP.</p>
+  <p><strong>${escapeHtml(options.clientName)}</strong> is requesting access through Cronometer MCP. Your Cronometer password and one-time code are used only to sign in and are not stored.</p>
+  ${writeConsent}
   ${error}
   <form method="post" action="/authorize">
     <input type="hidden" name="flow_id" value="${escapeHtml(options.flowId)}">
