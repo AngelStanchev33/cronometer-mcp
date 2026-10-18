@@ -44,7 +44,9 @@ Then connect ChatGPT to:
 https://cronometer-mcp.<your-workers-subdomain>.workers.dev/mcp
 ```
 
-The first connection opens `/authorize`, where the user signs into Cronometer and grants read-only access.
+The first connection opens `/authorize`, where the user signs into Cronometer and reviews the requested access. Read access is separate from write access. The `cronometer:write` scope is granted only when the user checks the explicit write-consent box; it permits creating recipes and custom foods, logging or removing diary entries, copying a day, and marking a day complete. Existing grants without that consent remain read-only until the user reconnects.
+
+To define an equal-weight recipe yield, pass `servings` to `add_recipe` (for example, `servings: 6`). The Worker calculates the serving measure from the total ingredient weight. Use `servingGrams` when you need a specific portion weight instead; these options cannot be combined.
 
 ## Secrets
 

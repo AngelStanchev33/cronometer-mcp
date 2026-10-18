@@ -15,6 +15,10 @@ export const authPropsSchema = z.object({
   cronometerMobileSession: mobileSessionSchema,
   cronometerUsername: z.string().min(1),
   cronometerWebSession: webSessionSchema,
+  // Missing on grants issued before write consent was added; keep those read-only.
+  cronometerWriteConsent: z.boolean().default(false),
+  // Per-access-token scopes are attached by the OAuth token-exchange callback.
+  cronometerAccessScopes: z.array(z.string()).default([]),
 });
 
 export type AuthContext = z.infer<typeof authPropsSchema>;

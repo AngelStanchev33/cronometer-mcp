@@ -13,6 +13,8 @@ import {
 } from "./context";
 
 const RECONNECT_MESSAGE = "Reconnect this MCP connection to Cronometer first.";
+const READ_SCOPE = "cronometer:read";
+const WRITE_SCOPE = "cronometer:write";
 
 export { authPropsSchema, mobileSessionSchema, webSessionSchema } from "./context";
 export type { AuthContext } from "./context";
@@ -84,12 +86,39 @@ function mobileErrorMessage(error: unknown): string {
   return "Cronometer request failed. Try again later.";
 }
 
+export function recipeServingPortion(options: {
+  totalGrams: number;
+  servings?: number;
+  servingGrams?: number;
+  servingName?: string;
+}) {
+  const servingGrams =
+    options.servingGrams ?? (options.servings ? options.totalGrams / options.servings : options.totalGrams);
+  return {
+    servingGrams,
+    servingName: options.servingName ?? (options.servings ? "1 of " + options.servings + " servings" : "Serving"),
+    servings: Math.round((options.totalGrams / servingGrams) * 100) / 100,
+  };
+}
+
 async function withMobileSession(
   getAuthContext: CronometerToolOptions["getAuthContext"],
   run: (session: mobile.CronometerMobileSession, context: AuthContext) => Promise<Record<string, unknown>>,
+  requireWriteConsent = false,
 ) {
   const context = getAuthContext();
   if (!context) return toolError(RECONNECT_MESSAGE);
+  if (!context.cronometerAccessScopes.includes(READ_SCOPE)) {
+    return toolError("This action requires the cronometer:read permission. Reconnect Cronometer MCP.");
+  }
+  if (
+    requireWriteConsent &&
+    (!context.cronometerWriteConsent || !context.cronometerAccessScopes.includes(WRITE_SCOPE))
+  ) {
+    return toolError(
+      "This action requires the cronometer:write permission. Reconnect Cronometer MCP and explicitly allow write access.",
+    );
+  }
   try {
     return toolSuccess(await run(context.cronometerMobileSession, context));
   } catch (error) {
@@ -150,6 +179,9 @@ export function registerCronometerTools(server: McpServer, options: CronometerTo
     async ({ dataType, startDate, endDate }) => {
       const context = authPropsSchema.safeParse(getAuthContext());
       if (!context.success) return toolError(RECONNECT_MESSAGE);
+      if (!context.data.cronometerAccessScopes.includes(READ_SCOPE)) {
+        return toolError("This action requires the cronometer:read permission. Reconnect Cronometer MCP.");
+      }
 
       try {
         const result = await exportCronometerData(
@@ -266,7 +298,7 @@ export function registerCronometerTools(server: McpServer, options: CronometerTo
           translationId,
         }),
         note: "Use the returned serving ID to remove this entry with remove_food_entry.",
-      })),
+      }), true),
   );
 
   server.registerTool(
@@ -284,7 +316,7 @@ export function registerCronometerTools(server: McpServer, options: CronometerTo
       withMobileSession(getAuthContext, async (session) => ({
         date: date ?? mobile.formatToday(session.timezone),
         ...(await mobile.deleteEntries(session, entryIds, date)),
-      })),
+      }), true),
   );
 
   server.registerTool(
@@ -302,7 +334,7 @@ export function registerCronometerTools(server: McpServer, options: CronometerTo
         date,
         marked: complete ? "complete" : "incomplete",
         result: await mobile.markDayComplete(session, date, complete),
-      })),
+      }), true),
   );
 
   server.registerTool(
@@ -317,7 +349,7 @@ export function registerCronometerTools(server: McpServer, options: CronometerTo
       withMobileSession(getAuthContext, async (session) => ({
         destination_date: date ?? mobile.formatToday(session.timezone),
         result: await mobile.copyDay(session, date),
-      })),
+      }), true),
   );
 
   // ---------------------------------------------------------------------------
@@ -474,7 +506,7 @@ export function registerCronometerTools(server: McpServer, options: CronometerTo
           name,
           note: "Use food_id and measure_id with add_food_entry to log this food.",
         };
-      }),
+      }, true),
   );
 
   server.registerTool(
@@ -484,7 +516,7 @@ export function registerCronometerTools(server: McpServer, options: CronometerTo
       description:
         "Create a recipe from other foods in the database; Cronometer derives the full nutrient profile " +
         "from the ingredients. Use search_foods to find each ingredient's food_id. After creation, log " +
-        "it with add_food_entry using the returned IDs.",
+        "it with add_food_entry using the returned IDs. Pass servings to make that many equal-weight portions.",
       inputSchema: z.object({
         name: z.string().min(1),
         ingredients: z
@@ -500,17 +532,33 @@ export function registerCronometerTools(server: McpServer, options: CronometerTo
           )
           .min(1)
           .describe('One entry per ingredient, e.g. {"foodId": 1234, "grams": 150}.'),
-        servingName: z.string().default("Serving"),
+        servingName: z.string().optional(),
         servingGrams: z
           .number()
           .positive()
           .optional()
           .describe("Grams in one serving. Defaults to the full batch weight."),
+        servings: z
+          .number()
+          .int()
+          .positive()
+          .optional()
+          .describe("Number of equal-weight portions in the full batch; cannot be combined with servingGrams."),
         comments: z.string().optional(),
+      }).superRefine((value, ctx) => {
+        if (value.servings !== undefined && value.servingGrams !== undefined) {
+          ctx.addIssue({
+            code: "custom",
+            message: "Choose servings or servingGrams, not both.",
+            path: ["servings"],
+          });
+        }
       }),
     },
-    async ({ name, ingredients, servingName, servingGrams, comments }) =>
+    async ({ name, ingredients, servingName, servingGrams, servings, comments }) =>
       withMobileSession(getAuthContext, async (session) => {
+        const totalGrams = ingredients.reduce((total, ingredient) => total + ingredient.grams, 0);
+        const portion = recipeServingPortion({ servingGrams, servingName, servings, totalGrams });
         const result = await mobile.createRecipe(session, {
           comments,
           ingredients: ingredients.map((ingredient) => ({
@@ -519,8 +567,8 @@ export function registerCronometerTools(server: McpServer, options: CronometerTo
             measureId: ingredient.measureId,
           })),
           name,
-          servingGrams,
-          servingName,
+          servingGrams: portion.servingGrams,
+          servingName: portion.servingName,
         });
         const food = await mobile.getFood(session, result.foodId);
         return {
@@ -529,9 +577,11 @@ export function registerCronometerTools(server: McpServer, options: CronometerTo
           measure_id: food.defaultMeasureId,
           name,
           note: "Use food_id and measure_id with add_food_entry to log this recipe.",
+          serving_grams: portion.servingGrams,
+          servings: portion.servings,
           total_grams: result.totalGrams,
         };
-      }),
+      }, true),
   );
 
   // ---------------------------------------------------------------------------

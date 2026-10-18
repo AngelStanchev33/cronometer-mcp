@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { authorizationSecurityHeaders, isAllowedAuthorizationOrigin } from "../src/auth";
+import { authorizationSecurityHeaders, grantScopes, isAllowedAuthorizationOrigin } from "../src/auth";
+import { authPropsSchema } from "@cronometer-mcp/core";
 
 describe("isAllowedAuthorizationOrigin", () => {
   it("allows same-origin and OAuth opaque-origin form submissions", () => {
@@ -42,5 +43,32 @@ describe("authorizationSecurityHeaders", () => {
     expect(authorizationSecurityHeaders().get("Content-Security-Policy")).toContain(
       "form-action 'self';",
     );
+  });
+});
+
+describe("Cronometer OAuth scope consent", () => {
+  it("grants write only when it was requested and explicitly checked", () => {
+    expect(grantScopes(["cronometer:read", "cronometer:write"], false)).toEqual([
+      "cronometer:read",
+    ]);
+    expect(grantScopes(["cronometer:read", "cronometer:write"], true)).toEqual([
+      "cronometer:read",
+      "cronometer:write",
+    ]);
+  });
+
+  it("does not grant scopes the client did not request", () => {
+    expect(grantScopes(["cronometer:read"], true)).toEqual(["cronometer:read"]);
+    expect(grantScopes(["unknown:scope", "cronometer:write"], true)).toEqual([]);
+  });
+
+  it("treats older grants without a write-consent field as read-only", () => {
+    const parsed = authPropsSchema.parse({
+      cronometerMobileSession: { sessionKey: "session", userId: 1 },
+      cronometerUsername: "user@example.com",
+      cronometerWebSession: { cookies: "session", userId: "1" },
+    });
+    expect(parsed.cronometerWriteConsent).toBe(false);
+    expect(parsed.cronometerAccessScopes).toEqual([]);
   });
 });

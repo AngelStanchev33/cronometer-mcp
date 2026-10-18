@@ -60,7 +60,15 @@ const oauthProvider = new OAuthProvider<RuntimeEnv>({
   clientIdMetadataDocumentEnabled: true,
   clientRegistrationEndpoint: "/oauth/register",
   defaultHandler: authHandler,
-  scopesSupported: ["cronometer:read"],
+  scopesSupported: ["cronometer:read", "cronometer:write"],
+  tokenExchangeCallback: async ({ props, requestedScope }) => ({
+    // Store the effective scopes on this access token so MCP handlers can
+    // enforce downscoped read-only tokens even when the grant also has write.
+    accessTokenProps: {
+      ...(typeof props === "object" && props !== null ? props : {}),
+      cronometerAccessScopes: requestedScope,
+    },
+  }),
   tokenEndpoint: "/oauth/token",
 });
 
